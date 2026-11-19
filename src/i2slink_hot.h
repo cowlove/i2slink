@@ -1,55 +1,56 @@
 #pragma once
 /* Placement and pacing for the i2slink polling loops.
  *
- * On the host these loops run on core 0 alongside the core 1 bus loop, so
- * they must run from IRAM (never flash) and must not hammer SRAM with
- * ifetch and polling reads. */
+ * They can run while the other core does hard real-time work (in the
+ * project this came from, a 6502 bus loop on core 1), so they run from IRAM
+ * (never flash) and pace their polling, to stay off the shared SRAM. */
 
 #include "esp_attr.h"
 #include "sdkconfig.h"
 
 #include <stdint.h>
 
-/* The host's Core0 hotspot placement (mirrors main/core0_hotspots.h, which
- * this component can't include), for the tight polling loops only
- * (i2slink_read(), i2slink_peek(), i2slink_hint()); the rest of the call chain is plain
- * IRAM_ATTR. With CONFIG_A8BB_CORE0_HOTSPOTS_EXPLICIT_PLACEMENT, main/link.lf
- * maps libsidecar_link.a's core0_hotspots section to IRAM; the Sidecar app
- * has no such option and gets plain IRAM_ATTR. */
-#if CONFIG_A8BB_CORE0_HOTSPOTS_EXPLICIT_PLACEMENT
-#define SIDECAR_HOT_ATTR __attribute__((section(".text.core0_hotspots"), noinline))
+/* Where the tight polling loops go (i2slink_read(), i2slink_peek(),
+ * i2slink_hint()); the rest of the call chain is plain IRAM_ATTR. By
+ * default IRAM_ATTR too. A project that places its hot code itself defines
+ * I2SLINK_HOT_SECTION (e.g. ".text.core0_hotspots") for this component and
+ * maps that section with a linker fragment (this repo: CMakeLists.txt and
+ * main/link.lf). */
+#ifdef I2SLINK_HOT_SECTION
+#define I2SLINK_HOT_ATTR __attribute__((section(I2SLINK_HOT_SECTION), noinline))
 #else
-#define SIDECAR_HOT_ATTR IRAM_ATTR __attribute__((noinline))
+#define I2SLINK_HOT_ATTR IRAM_ATTR __attribute__((noinline))
 #endif
 
-/* Iterations of sidecar_nez_delay() per idle poll: about two cycles each,
+/* Iterations of i2slink_nez_delay() per idle poll: about two cycles each,
  * so 10 is about 0.08 us at 240 MHz. The tripwire window is about 24 us, so
  * even a few hundred costs nothing in window hits. */
-#ifndef SIDECAR_POLL_DELAY
-#define SIDECAR_POLL_DELAY 200U
+#ifndef I2SLINK_POLL_DELAY
+#define I2SLINK_POLL_DELAY 200U
 #endif
 
-/* Simulation hooks (csim/a800 builds this component on the host): what
+/* Simulation hooks (a host-side simulator can build this component, as
+ * this repo's csim/a800 does): what
  * the link's loops cost in CPU time, which simulated time has no other way
  * to see. Nothing on the chip. A lock search's cost was measured on the
  * a24 bench pair (2026-11-14): lockstress peek recoveries, one anchored
  * search plus a copy, average 253 us; the exhaustive search took about
  * 2.4 ms before the anchored one existed. */
-#ifndef SIDECAR_SIM_CPU_US
-#define SIDECAR_SIM_CPU_US(us) ((void)0)
+#ifndef I2SLINK_SIM_CPU_US
+#define I2SLINK_SIM_CPU_US(us) ((void)0)
 #endif
-#define SIDECAR_SEARCH_US_ANCHORED 250U
-#define SIDECAR_SEARCH_US_FULL 2400U
+#define I2SLINK_SEARCH_US_ANCHORED 250U
+#define I2SLINK_SEARCH_US_FULL 2400U
 /* CPU cycles passing inline, without letting the rest of the simulation
  * run (code inside a critical section, such as the region copy with its
  * interrupts masked): the emulated hardware still moves meanwhile. The
  * copy's cost per 16-bit word is an estimate (a load, a store, the wrap
  * test), not yet measured. */
-#ifndef SIDECAR_SIM_ELAPSE
-#define SIDECAR_SIM_ELAPSE(cycles) ((void)0)
+#ifndef I2SLINK_SIM_ELAPSE
+#define I2SLINK_SIM_ELAPSE(cycles) ((void)0)
 #endif
-#ifndef SIDECAR_COPY_CYCLES_PER_HALFWORD
-#define SIDECAR_COPY_CYCLES_PER_HALFWORD 5U
+#ifndef I2SLINK_COPY_CYCLES_PER_HALFWORD
+#define I2SLINK_COPY_CYCLES_PER_HALFWORD 5U
 #endif
 
 #if !defined(__XTENSA__)
@@ -57,16 +58,16 @@
 #ifdef __cplusplus
 extern "C"
 #endif
-void sidecar_sim_delay_cycles(uint32_t cycles);
-static inline void sidecar_nez_delay(uint32_t iterations)
+void i2slink_sim_delay_cycles(uint32_t cycles);
+static inline void i2slink_nez_delay(uint32_t iterations)
 {
-    sidecar_sim_delay_cycles(2U * iterations);
+    i2slink_sim_delay_cycles(2U * iterations);
 }
 #else
 /* A delay with no instruction fetch: a zero-overhead loopnez over two
  * nop.n, aligned so the 4-byte body sits in one fetch word and is never
- * refetched (a C copy of loopNezDelay() in main/util.h). */
-static inline __attribute__((always_inline)) void sidecar_nez_delay(uint32_t iterations)
+ * refetched. */
+static inline __attribute__((always_inline)) void i2slink_nez_delay(uint32_t iterations)
 {
     __asm__ volatile("j 2f\n\t"
                      ".align 4\n\t"
