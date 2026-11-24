@@ -1050,8 +1050,15 @@ static IRAM_ATTR bool search(i2slink_t *link, bool allow_full)
     uint8_t phase, lane;
     uint16_t marker;
     bool fallback = false;
-    const bool found = wire_search(link->search_raw, link->rx_tag, link->phase,
-                                   link->lane, &phase, &lane, &marker, allow_full, &fallback);
+    bool found;
+    if (allow_full && I2SLINK_SIM_FULL_SEARCH_ONLY()) {
+        found = wire_search_full(link->search_raw, link->rx_tag, link->phase, link->lane, &phase, &lane,
+                                 &marker);
+        fallback = found;
+    } else {
+        found = wire_search(link->search_raw, link->rx_tag, link->phase, link->lane, &phase, &lane, &marker,
+                            allow_full, &fallback);
+    }
     /* For simulation only (nothing on the chip): the search's CPU time. */
     I2SLINK_SIM_CPU_US(allow_full && (!found || fallback) ? I2SLINK_SEARCH_US_ANCHORED + I2SLINK_SEARCH_US_FULL
                                                           : I2SLINK_SEARCH_US_ANCHORED);

@@ -36,6 +36,12 @@
 #ifndef I2SLINK_SIM_CPU_US
 #define I2SLINK_SIM_CPU_US(us) ((void)0)
 #endif
+/* A test of the exhaustive search: nonzero sends read()'s lock searches
+ * straight to it, skipping the anchored one (each lock then counts as a
+ * fallback). Nothing on the chip. */
+#ifndef I2SLINK_SIM_FULL_SEARCH_ONLY
+#define I2SLINK_SIM_FULL_SEARCH_ONLY() 0
+#endif
 #define I2SLINK_SEARCH_US_ANCHORED 250U
 #define I2SLINK_SEARCH_US_FULL 2400U
 /* CPU cycles passing inline, without letting the rest of the simulation
