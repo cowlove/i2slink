@@ -67,8 +67,7 @@ struct i2slink {
     /* DMA memory (the struct is allocated DMA-capable, 16-aligned). */
     uint8_t tx_cycle[N] __attribute__((aligned(16)));
     uint8_t rx_ring[N] __attribute__((aligned(16)));
-    uint8_t search_raw[N] __attribute__((aligned(16)));
-    uint8_t search_aligned[N];
+    uint8_t search_raw[N] __attribute__((aligned(16)));   /* the lock search's snapshot of rx_ring */
 
     /* The DMA descriptors, here rather than scattered over the heap: the
      * poll reads RX's and the DMA writes them back every cycle. */
@@ -153,13 +152,11 @@ struct i2slink {
     i2slink_stats_t stats;
 };
 
-/* Everything the link's polling and DMA touch is in this one struct. Aligned
- * to LINK_ALIGN (the smallest power of two that holds it: a divisor of the
- * 32 KB SRAM bank), it can't straddle a bank, so all of it lands in exactly
- * one. It grows with the frame (about 5 cycles: I2SLINK_LINE_COUNT). */
-#define LINK_ALIGN                                                                \
-    (sizeof(struct i2slink) <= 4096U ? 4096U : sizeof(struct i2slink) <= 8192U ? 8192U \
-     : sizeof(struct i2slink) <= 16384U ? 16384U : 32768U)
+/* Everything the link's polling and DMA touch is in this one struct, kept
+ * inside one 32 KB SRAM bank (link_alloc()), so all of it lands in exactly
+ * one. It grows with the frame (three cycles: I2SLINK_LINE_COUNT). */
+#define LINK_BANK_BYTES 32768U
+#define LINK_CAPS (MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 _Static_assert(sizeof(struct i2slink) <= 32768U, "i2slink_t no longer fits one 32 KB SRAM bank");
 
 /* ------------------------------------------------------------------------ */
@@ -1053,7 +1050,7 @@ static IRAM_ATTR bool search(i2slink_t *link, bool allow_full)
     uint8_t phase, lane;
     uint16_t marker;
     bool fallback = false;
-    const bool found = wire_search(link->search_raw, link->search_aligned, link->rx_tag, link->phase,
+    const bool found = wire_search(link->search_raw, link->rx_tag, link->phase,
                                    link->lane, &phase, &lane, &marker, allow_full, &fallback);
     /* For simulation only (nothing on the chip): the search's CPU time. */
     I2SLINK_SIM_CPU_US(allow_full && (!found || fallback) ? I2SLINK_SEARCH_US_ANCHORED + I2SLINK_SEARCH_US_FULL
@@ -1668,14 +1665,51 @@ static void log_placement(const i2slink_t *link)
            (unsigned)tx_first, (unsigned)tx_end, sram_bank(tx_first), sram_bank(tx_end - 1U));
 }
 
+static bool link_in_one_bank(const void *p)
+{
+    const uintptr_t a = (uintptr_t)p;
+    return a / LINK_BANK_BYTES == (a + sizeof(i2slink_t) - 1U) / LINK_BANK_BYTES;
+}
+
+/* The struct, zeroed, at its own size in one SRAM bank: an allocation that
+ * straddles a bank boundary is held while the next try goes elsewhere, then
+ * all held ones are freed. (Aligning it to the next power of two above its
+ * size did the same, at the cost of up to half of it in padding.) As a last
+ * resort, that aligned allocation. */
+static i2slink_t *link_alloc(void)
+{
+    enum { TRIES = 8 };
+    void *held[TRIES];
+    unsigned n = 0U;
+    void *link = NULL;
+    while (n < TRIES) {
+        void *p = heap_caps_aligned_calloc(16U, 1U, sizeof(i2slink_t), LINK_CAPS);
+        if (!p || link_in_one_bank(p)) {
+            link = p;
+            break;
+        }
+        held[n++] = p;
+    }
+    while (n > 0U) {
+        heap_caps_free(held[--n]);
+    }
+    if (!link) {
+        size_t align = 16U;
+        while (align < sizeof(i2slink_t)) {
+            align <<= 1U;
+        }
+        link = heap_caps_aligned_calloc(align, 1U, sizeof(i2slink_t), LINK_CAPS);
+    }
+    return (i2slink_t *)link;
+}
+
 esp_err_t i2slink_init(i2slink_t **out, const i2slink_config_t *config)
 {
     if (!out || !config || (config->i2s_port != I2S_NUM_0 && config->i2s_port != I2S_NUM_1)) {
         return ESP_ERR_INVALID_ARG;
     }
     runs_init();
-    i2slink_t *link = (i2slink_t *)heap_caps_aligned_calloc(LINK_ALIGN, 1U, sizeof(*link),
-                                               MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    i2slink_t *link = link_alloc();
     if (!link) {
         return ESP_ERR_NO_MEM;
     }

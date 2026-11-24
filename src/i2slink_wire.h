@@ -153,16 +153,6 @@ static inline IRAM_ATTR bool wire_is_aligned(unsigned phase, unsigned lane)
     return (phase | lane) == 0U;
 }
 
-static inline IRAM_ATTR bool marker_at(const uint8_t *aligned, size_t m)
-{
-    for (size_t byte = 0U; byte < I2SLINK_HSYNC_BYTES; ++byte) {
-        if (aligned[(m + byte) % N] != hsync[byte]) {
-            return false;
-        }
-    }
-    return true;
-}
-
 /* ---- Decoding under a lock (phase, lane, marker) ---- */
 static inline IRAM_ATTR size_t wire_aligned_of(uint16_t marker, size_t tx_offset)
 {
@@ -323,35 +313,34 @@ __attribute__((unused)) static IRAM_ATTR bool wire_search_anchored(const uint8_t
     return false;
 }
 
-/* The exhaustive search (the original): decode the whole snapshot at each
- * of the 16 offsets and test every position, with the same checks as the
- * anchored one. ~2.4 ms. aligned is N bytes of scratch. Kept as the
- * fallback for read()'s searches while the anchored search proves itself
- * (a lock only this finds is counted: stats.locks_fallback). */
-__attribute__((unused)) static IRAM_ATTR bool wire_search_full(const uint8_t *raw, uint8_t *aligned,
-                                                               const char tag[4], unsigned start_phase,
-                                                               unsigned start_lane, uint8_t *phase_out,
-                                                               uint8_t *lane_out, uint16_t *marker_out)
+/* The exhaustive search (the original): test every position at each of
+ * the 16 offsets, with the same checks as the anchored one, decoding on
+ * demand (most positions fail at their first byte). Kept as the fallback
+ * for read()'s searches while the anchored search proves itself (a lock
+ * only this finds is counted: stats.locks_fallback). */
+__attribute__((unused)) static IRAM_ATTR bool wire_search_full(const uint8_t *raw, const char tag[4],
+                                                               unsigned start_phase, unsigned start_lane,
+                                                               uint8_t *phase_out, uint8_t *lane_out,
+                                                               uint16_t *marker_out)
 {
     for (unsigned step = 0U; step < 16U; ++step) {
         const unsigned lane = (start_lane + step / 8U) & 1U;
         const unsigned phase = (start_phase + step) & 7U;
-        for (size_t j = 0U; j < N; ++j) {
-            aligned[j] = decode_at(raw, phase, lane, j);
-        }
         for (size_t m = 0U; m < N; ++m) {
-            if (aligned[m] != hsync[0] || !marker_at(aligned, m)) {
-                continue;
-            }
             bool valid = true;
+            for (size_t byte = 0U; valid && byte < I2SLINK_HSYNC_BYTES; ++byte) {
+                valid = decode_at(raw, phase, lane, m + byte) == hsync[byte];
+            }
             for (size_t back = 1U; valid && back <= I2SLINK_VSYNC_BYTES; ++back) {
-                valid = aligned[(m + N - back) % N] == 0U;
+                valid = decode_at(raw, phase, lane, m + N - back) == 0U;
             }
             for (size_t line = 1U; valid && line <= I2SLINK_LINE_COUNT; ++line) {
-                valid = marker_at(aligned, m + line * LINE_STRIDE);
+                for (size_t byte = 0U; valid && byte < I2SLINK_HSYNC_BYTES; ++byte) {
+                    valid = decode_at(raw, phase, lane, m + line * LINE_STRIDE + byte) == hsync[byte];
+                }
             }
             for (size_t byte = 0U; valid && byte < 4U; ++byte) {
-                valid = aligned[(m + I2SLINK_HSYNC_BYTES + byte) % N] == (uint8_t)tag[byte];
+                valid = decode_at(raw, phase, lane, m + I2SLINK_HSYNC_BYTES + byte) == (uint8_t)tag[byte];
             }
             if (valid) {
                 *phase_out = (uint8_t)phase;
@@ -366,7 +355,7 @@ __attribute__((unused)) static IRAM_ATTR bool wire_search_full(const uint8_t *ra
 
 /* The lock search: anchored first, then, if allow_full, the exhaustive one.
  * *fallback is set when only the exhaustive search found it. */
-__attribute__((unused)) static IRAM_ATTR bool wire_search(const uint8_t *raw, uint8_t *aligned,
+__attribute__((unused)) static IRAM_ATTR bool wire_search(const uint8_t *raw,
                                                           const char tag[4], unsigned start_phase,
                                                           unsigned start_lane, uint8_t *phase_out,
                                                           uint8_t *lane_out, uint16_t *marker_out,
@@ -377,7 +366,7 @@ __attribute__((unused)) static IRAM_ATTR bool wire_search(const uint8_t *raw, ui
         return true;
     }
     if (allow_full &&
-        wire_search_full(raw, aligned, tag, start_phase, start_lane, phase_out, lane_out, marker_out)) {
+        wire_search_full(raw, tag, start_phase, start_lane, phase_out, lane_out, marker_out)) {
         *fallback = true;
         return true;
     }
